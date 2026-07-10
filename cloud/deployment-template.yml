@@ -22,6 +22,6 @@ data_collector:
   sampling_rate: 1.0
   collections:
     model_inputs:
-      enabled: true
+      enabled: 'true'
     model_outputs:
-      enabled: true
+      enabled: 'true'
