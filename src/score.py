@@ -4,7 +4,6 @@ import os
 from pathlib import Path
 
 import joblib
-import pandas as pd
 
 
 FEATURE_COLUMNS = [
@@ -25,19 +24,24 @@ def init():
     model_dir = os.getenv("AZUREML_MODEL_DIR")
     logging.info(f"AZUREML_MODEL_DIR = {model_dir}")
 
-    if model_dir is None:
+    if not model_dir:
         raise RuntimeError("AZUREML_MODEL_DIR environment variable is not set.")
 
-    model_dir_path = Path(model_dir)
+    model_root = Path(model_dir)
 
-    logging.info("Listing model directory contents:")
-    for path in model_dir_path.rglob("*"):
+    logging.info("Listing files under AZUREML_MODEL_DIR:")
+    for path in model_root.rglob("*"):
         logging.info(str(path))
 
-    model_path = model_dir_path / "model.pkl"
+    model_files = list(model_root.rglob("model.pkl"))
 
-    if not model_path.exists():
-        raise FileNotFoundError(f"Model file not found at: {model_path}")
+    if not model_files:
+        raise FileNotFoundError(
+            f"model.pkl was not found anywhere under AZUREML_MODEL_DIR: {model_root}"
+        )
+
+    model_path = model_files[0]
+    logging.info(f"Loading model from: {model_path}")
 
     model = joblib.load(model_path)
 
@@ -50,19 +54,31 @@ def run(raw_data):
 
         payload = json.loads(raw_data)
 
-        input_df = pd.DataFrame(payload["data"])
-        input_df = input_df[FEATURE_COLUMNS]
+        rows = payload["data"]
 
-        predictions = model.predict(input_df)
-        probabilities = model.predict_proba(input_df).max(axis=1)
+        input_rows = []
+        for row in rows:
+            input_rows.append(
+                [
+                    float(row["sepal_length"]),
+                    float(row["sepal_width"]),
+                    float(row["petal_length"]),
+                    float(row["petal_width"]),
+                ]
+            )
+
+        predictions = model.predict(input_rows)
+        probabilities = model.predict_proba(input_rows).max(axis=1)
 
         results = []
 
         for prediction, confidence in zip(predictions, probabilities):
+            prediction_int = int(prediction)
+
             results.append(
                 {
-                    "prediction": int(prediction),
-                    "prediction_label": CLASS_NAMES[int(prediction)],
+                    "prediction": prediction_int,
+                    "prediction_label": CLASS_NAMES[prediction_int],
                     "confidence": float(confidence),
                 }
             )

@@ -37,6 +37,8 @@ jobs:
       - name: Train model
         run: |
           python src/train.py --model-output model
+          echo "Listing trained model files:"
+          find model -type f -maxdepth 3
 
       - name: Azure login using OIDC
         uses: azure/login@v2
@@ -48,19 +50,28 @@ jobs:
       - name: Install Azure ML CLI extension
         run: |
           az extension add -n ml -y || az extension update -n ml
+          az ml -h
 
       - name: Register model in Azure ML
         run: |
+          if [ ! -f "model/model.pkl" ]; then
+            echo "ERROR: model/model.pkl was not found."
+            echo "Current model directory contents:"
+            find model -type f -maxdepth 5 || true
+            exit 1
+          fi
+
           MODEL_VERSION=$(az ml model create \
             --name "$MODEL_NAME" \
             --type custom_model \
-            --path model \
+            --path model/model.pkl \
             --resource-group "$RESOURCE_GROUP" \
             --workspace-name "$WORKSPACE_NAME" \
             --query version \
             -o tsv)
 
           echo "MODEL_VERSION=$MODEL_VERSION" >> "$GITHUB_ENV"
+          echo "Registered model: $MODEL_NAME"
           echo "Registered model version: $MODEL_VERSION"
 
       - name: Create endpoint if it does not exist
@@ -69,30 +80,43 @@ jobs:
             --name "$ENDPOINT_NAME" \
             --resource-group "$RESOURCE_GROUP" \
             --workspace-name "$WORKSPACE_NAME" > /dev/null 2>&1; then
+
             echo "Endpoint already exists: $ENDPOINT_NAME"
+
           else
+
+            echo "Creating endpoint: $ENDPOINT_NAME"
+
             az ml online-endpoint create \
               --name "$ENDPOINT_NAME" \
               --auth-mode key \
               --resource-group "$RESOURCE_GROUP" \
               --workspace-name "$WORKSPACE_NAME"
+
           fi
 
       - name: Prepare deployment YAML
         run: |
           cp cloud/deployment-template.yml deployment.yml
+
           sed -i "s/__ENDPOINT_NAME__/${ENDPOINT_NAME}/g" deployment.yml
           sed -i "s/__MODEL_NAME__/${MODEL_NAME}/g" deployment.yml
           sed -i "s/__MODEL_VERSION__/${MODEL_VERSION}/g" deployment.yml
+
+          echo "Final deployment.yml:"
           cat deployment.yml
 
       - name: Create or update blue deployment
         run: |
+          set +e
+
           if az ml online-deployment show \
             --name blue \
             --endpoint-name "$ENDPOINT_NAME" \
             --resource-group "$RESOURCE_GROUP" \
             --workspace-name "$WORKSPACE_NAME" > /dev/null 2>&1; then
+
+            echo "Updating existing deployment: blue"
 
             az ml online-deployment update \
               --file deployment.yml \
@@ -101,6 +125,8 @@ jobs:
 
           else
 
+            echo "Creating new deployment: blue"
+
             az ml online-deployment create \
               --file deployment.yml \
               --all-traffic \
@@ -108,6 +134,40 @@ jobs:
               --workspace-name "$WORKSPACE_NAME"
 
           fi
+
+          DEPLOY_STATUS=$?
+
+          if [ $DEPLOY_STATUS -ne 0 ]; then
+            echo "Deployment failed. Fetching inference-server logs..."
+
+            az ml online-deployment get-logs \
+              --name blue \
+              --endpoint-name "$ENDPOINT_NAME" \
+              --resource-group "$RESOURCE_GROUP" \
+              --workspace-name "$WORKSPACE_NAME" \
+              --container inference-server \
+              --lines 300 || true
+
+            echo "Fetching storage-initializer logs..."
+
+            az ml online-deployment get-logs \
+              --name blue \
+              --endpoint-name "$ENDPOINT_NAME" \
+              --resource-group "$RESOURCE_GROUP" \
+              --workspace-name "$WORKSPACE_NAME" \
+              --container storage-initializer \
+              --lines 300 || true
+
+            exit $DEPLOY_STATUS
+          fi
+
+      - name: Set all traffic to blue
+        run: |
+          az ml online-endpoint update \
+            --name "$ENDPOINT_NAME" \
+            --traffic "blue=100" \
+            --resource-group "$RESOURCE_GROUP" \
+            --workspace-name "$WORKSPACE_NAME"
 
       - name: Test online endpoint
         run: |

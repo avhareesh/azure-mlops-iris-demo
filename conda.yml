@@ -6,8 +6,6 @@ dependencies:
   - pip
   - pip:
       - azureml-defaults
-      - azureml-ai-monitoring
       - scikit-learn
-      - pandas
       - numpy
       - joblib
