@@ -6,11 +6,12 @@ endpoint_name: __ENDPOINT_NAME__
 model: azureml:__MODEL_NAME__:__MODEL_VERSION__
 
 environment:
+  name: iris-inference-env
   image: mcr.microsoft.com/azureml/openmpi4.1.0-ubuntu22.04:latest
-  conda_file: ../conda.yml
+  conda_file: conda.yml
 
 code_configuration:
-  code: ../src
+  code: src
   scoring_script: score.py
 
 instance_type: Standard_DS2_v2
@@ -21,6 +22,6 @@ data_collector:
   sampling_rate: 1.0
   collections:
     model_inputs:
-      enabled: 'True'
+      enabled: true
     model_outputs:
-      enabled: 'True'
+      enabled: true
