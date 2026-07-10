@@ -1,0 +1,119 @@
+name: mlops-azureml
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  RESOURCE_GROUP: rg-mlops-demo
+  WORKSPACE_NAME: aml-mlops-demo
+  MODEL_NAME: iris-sklearn
+  ENDPOINT_NAME: iris-endpoint-hareesh-001
+
+jobs:
+  train-register-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install training dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Train model
+        run: |
+          python src/train.py --model-output model
+
+      - name: Azure login using OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install Azure ML CLI extension
+        run: |
+          az extension add -n ml -y || az extension update -n ml
+
+      - name: Register model in Azure ML
+        run: |
+          MODEL_VERSION=$(az ml model create \
+            --name "$MODEL_NAME" \
+            --type custom_model \
+            --path model \
+            --resource-group "$RESOURCE_GROUP" \
+            --workspace-name "$WORKSPACE_NAME" \
+            --query version \
+            -o tsv)
+
+          echo "MODEL_VERSION=$MODEL_VERSION" >> "$GITHUB_ENV"
+          echo "Registered model version: $MODEL_VERSION"
+
+      - name: Create endpoint if it does not exist
+        run: |
+          if az ml online-endpoint show \
+            --name "$ENDPOINT_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --workspace-name "$WORKSPACE_NAME" > /dev/null 2>&1; then
+            echo "Endpoint already exists: $ENDPOINT_NAME"
+          else
+            az ml online-endpoint create \
+              --name "$ENDPOINT_NAME" \
+              --auth-mode key \
+              --resource-group "$RESOURCE_GROUP" \
+              --workspace-name "$WORKSPACE_NAME"
+          fi
+
+      - name: Prepare deployment YAML
+        run: |
+          cp cloud/deployment-template.yml deployment.yml
+          sed -i "s/__ENDPOINT_NAME__/${ENDPOINT_NAME}/g" deployment.yml
+          sed -i "s/__MODEL_NAME__/${MODEL_NAME}/g" deployment.yml
+          sed -i "s/__MODEL_VERSION__/${MODEL_VERSION}/g" deployment.yml
+          cat deployment.yml
+
+      - name: Create or update blue deployment
+        run: |
+          if az ml online-deployment show \
+            --name blue \
+            --endpoint-name "$ENDPOINT_NAME" \
+            --resource-group "$RESOURCE_GROUP" \
+            --workspace-name "$WORKSPACE_NAME" > /dev/null 2>&1; then
+
+            az ml online-deployment update \
+              --file deployment.yml \
+              --resource-group "$RESOURCE_GROUP" \
+              --workspace-name "$WORKSPACE_NAME"
+
+          else
+
+            az ml online-deployment create \
+              --file deployment.yml \
+              --all-traffic \
+              --resource-group "$RESOURCE_GROUP" \
+              --workspace-name "$WORKSPACE_NAME"
+
+          fi
+
+      - name: Test online endpoint
+        run: |
+          az ml online-endpoint invoke \
+            --name "$ENDPOINT_NAME" \
+            --deployment-name blue \
+            --request-file sample-request.json \
+            --resource-group "$RESOURCE_GROUP" \
+            --workspace-name "$WORKSPACE_NAME"
